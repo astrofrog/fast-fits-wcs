@@ -1,101 +1,92 @@
-"""Reproject a synthetic image using fast_fits_wcs, and check it against astropy.wcs.
+"""Reproject the MSX galactic-center image into the 2MASS frame, twice.
 
-This exercises the APE 14 interface end-to-end: the ``reproject`` package drives
-``pixel_to_world_values`` / ``world_to_pixel_values`` on the WCS objects we hand
-it, with no knowledge that they're fast_fits_wcs rather than astropy. We reproject the
-same image twice -- once with fast_fits_wcs WCS objects, once with the equivalent
-astropy WCS objects -- and confirm the results agree, which they must if fast_fits_wcs
-is a faithful drop-in.
+This reproduces the classic ``reproject`` getting-started example, but does the
+reprojection two ways and compares them:
+
+* the input MSX image is ``GLON-CAR`` (galactic, cylindrical),
+* the output 2MASS frame is ``RA---TAN`` (equatorial, gnomonic),
+
+so it exercises both a cylindrical and a zenithal WCS, in different coordinate
+frames, entirely through the APE 14 interface. We build the WCS objects once
+with ``astropy.wcs.WCS`` and once with ``fast_fits_wcs.WCS.from_header``, feed
+each pair to ``reproject_interp``, and confirm the results agree. A WCSAxes
+figure shows the original, both reprojections, and their difference.
 
 Run:  python examples/reproject_example.py
+Data: the MSX/2MASS galactic-center cutouts bundled as astropy example data.
 """
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")  # headless: write a PNG, don't open a window
+import matplotlib.pyplot as plt
+
+from astropy.io import fits
+from astropy.utils.data import get_pkg_data_filename
+from astropy.visualization import PercentileInterval
+from astropy.wcs import WCS as AstropyWCS
 from reproject import reproject_interp
 
 from fast_fits_wcs import WCS as FastWCS
-from astropy.wcs import WCS as AstropyWCS
+
+OUT_PNG = __file__.replace(".py", ".png")
 
 
-def _pc(rot_deg):
-    c, s = np.cos(np.deg2rad(rot_deg)), np.sin(np.deg2rad(rot_deg))
-    return np.array([[c, -s], [s, c]])
-
-
-def make_jax_wcs(crval, crpix, cdelt, rot_deg=0.0):
-    w = FastWCS(naxis=2)
-    w.ctype = ["RA---TAN", "DEC--TAN"]
-    w.crval = list(crval)
-    w.crpix = list(crpix)
-    w.cdelt = list(cdelt)
-    w.pc = _pc(rot_deg)
-    return w
-
-
-def make_astropy_wcs(crval, crpix, cdelt, rot_deg=0.0):
-    w = AstropyWCS(naxis=2)
-    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-    w.wcs.crval = list(crval)
-    w.wcs.crpix = list(crpix)
-    w.wcs.cdelt = list(cdelt)
-    w.wcs.pc = _pc(rot_deg)
-    return w
-
-
-def synthetic_image(ny, nx):
-    """A smooth image with structure, so interpolation differences would show."""
-    y, x = np.mgrid[0:ny, 0:nx].astype(float)
-    img = np.zeros((ny, nx))
-    for (cy, cx, amp, sig) in [(60, 70, 5.0, 12.0), (140, 120, 3.0, 20.0)]:
-        img += amp * np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * sig ** 2))
-    img += 0.01 * x + 0.005 * y  # gentle gradient
-    return img
+def load():
+    twomass = fits.open(get_pkg_data_filename("galactic_center/gc_2mass_k.fits"))[0]
+    msx = fits.open(get_pkg_data_filename("galactic_center/gc_msx_e.fits"))[0]
+    return twomass, msx
 
 
 def main():
-    ny, nx = 200, 200
-    data = synthetic_image(ny, nx)
+    twomass, msx = load()
+    shape_out = twomass.data.shape
 
-    # Input frame and a rotated/shifted output frame.
-    in_params = dict(crval=[150.0, 2.0], crpix=[100.0, 100.0], cdelt=[-0.01, 0.01])
-    out_params = dict(crval=[150.05, 2.02], crpix=[100.0, 100.0],
-                      cdelt=[-0.01, 0.01], rot_deg=15.0)
-    shape_out = (ny, nx)
-
-    # --- reproject with fast_fits_wcs ------------------------------------------------
-    jax_out, jax_fp = reproject_interp(
-        (data, make_jax_wcs(**in_params)),
-        make_jax_wcs(**out_params),
+    # Reproject MSX (GLON-CAR) onto the 2MASS (RA---TAN) frame, each WCS built
+    # by both libraries.
+    msx_astropy, _ = reproject_interp(
+        (msx.data, AstropyWCS(msx.header)),
+        AstropyWCS(twomass.header),
         shape_out=shape_out,
     )
-
-    # --- reproject with astropy (reference) ----------------------------------
-    ap_out, ap_fp = reproject_interp(
-        (data, make_astropy_wcs(**in_params)),
-        make_astropy_wcs(**out_params),
+    msx_fast, _ = reproject_interp(
+        (msx.data, FastWCS.from_header(msx.header)),
+        FastWCS.from_header(twomass.header),
         shape_out=shape_out,
     )
 
     # --- compare --------------------------------------------------------------
-    both_valid = (jax_fp == 1) & (ap_fp == 1)
-    n_both = int(both_valid.sum())
-    data_diff = np.max(np.abs(jax_out[both_valid] - ap_out[both_valid]))
+    valid = np.isfinite(msx_astropy) & np.isfinite(msx_fast)
+    max_abs = np.max(np.abs(msx_astropy[valid] - msx_fast[valid]))
+    scale = np.nanpercentile(np.abs(msx_astropy[valid]), 99)
+    print(f"reprojected pixels (finite both): {int(valid.sum())}")
+    print(f"max |astropy - fast_fits_wcs|   : {max_abs:.3e}")
+    print(f"  (relative to 99th pct {scale:.3e}): {max_abs / scale:.2e}")
+    assert max_abs / scale < 1e-9, "reprojections disagree"
 
-    # Footprints may disagree only on a handful of edge pixels, where a ~1e-8
-    # deg WCS difference flips a sample just across the input boundary.
-    fp_disagree = int(np.sum(jax_fp != ap_fp))
-    fp_frac = fp_disagree / jax_fp.size
+    # --- plot (WCSAxes, on the 2MASS frame) ----------------------------------
+    twcs = AstropyWCS(twomass.header)
+    interval = PercentileInterval(99.0)
+    vmin, vmax = interval.get_limits(twomass.data)
+    mvmin, mvmax = interval.get_limits(msx_astropy[np.isfinite(msx_astropy)])
 
-    in_flux = np.nansum(data)
-    jax_flux = np.nansum(jax_out)
-
-    print(f"valid (both) pixels        : {n_both}")
-    print(f"max |jax - astropy| value  : {data_diff:.3e}")
-    print(f"footprint pixels disagree  : {fp_disagree} ({fp_frac:.2%})")
-    print(f"input flux / jax out flux  : {in_flux:.2f} / {jax_flux:.2f}")
-
-    assert data_diff < 1e-6, "reprojected values disagree with astropy"
-    assert fp_frac < 1e-3, "footprints disagree on more than 0.1% of pixels"
-    print("\nOK: reproject with fast_fits_wcs matches reproject with astropy.wcs")
+    fig = plt.figure(figsize=(16, 4.2))
+    panels = [
+        ("2MASS K (original)", twomass.data, vmin, vmax, "afmhot"),
+        ("MSX reprojected (astropy.wcs)", msx_astropy, mvmin, mvmax, "afmhot"),
+        ("MSX reprojected (fast_fits_wcs)", msx_fast, mvmin, mvmax, "afmhot"),
+        ("difference (fast - astropy)", msx_fast - msx_astropy, -1e-12, 1e-12, "RdBu"),
+    ]
+    for i, (title, data, lo, hi, cmap) in enumerate(panels, start=1):
+        ax = fig.add_subplot(1, 4, i, projection=twcs)
+        ax.imshow(data, origin="lower", vmin=lo, vmax=hi, cmap=cmap)
+        ax.set_title(title, fontsize=10)
+        ax.coords[0].set_axislabel("RA")
+        ax.coords[1].set_axislabel("Dec")
+    fig.tight_layout()
+    fig.savefig(OUT_PNG, dpi=110)
+    print(f"\nwrote {OUT_PNG}")
+    print("OK: fast_fits_wcs reprojection matches astropy.wcs (CAR -> TAN, galactic -> equatorial)")
 
 
 if __name__ == "__main__":

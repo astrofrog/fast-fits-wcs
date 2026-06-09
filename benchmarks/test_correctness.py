@@ -37,6 +37,22 @@ cases = [
     # swapped axis order: DEC first
     (dict(crval=[20.0, 10.0], crpix=[128.0, 128.0], cdelt=[0.001, -0.001], rot_deg=15.0,
           ctype=("DEC--TAN", "RA---TAN"))),
+    # other zenithal projections
+    (dict(crval=[266.4, -29.0], crpix=[256.0, 256.0], cdelt=[-1e-3, 1e-3], rot_deg=12.0,
+          ctype=("RA---STG", "DEC--STG"))),
+    (dict(crval=[150.0, 40.0], crpix=[256.0, 256.0], cdelt=[-2e-3, 2e-3], rot_deg=-5.0,
+          ctype=("RA---SIN", "DEC--SIN"))),
+    (dict(crval=[10.0, 20.0], crpix=[256.0, 256.0], cdelt=[-5e-3, 5e-3], rot_deg=30.0,
+          ctype=("RA---ARC", "DEC--ARC"))),
+    (dict(crval=[300.0, -60.0], crpix=[256.0, 256.0], cdelt=[-4e-3, 4e-3], rot_deg=0.0,
+          ctype=("RA---ZEA", "DEC--ZEA"))),
+    # cylindrical CAR (exercises the general celestial-pole computation)
+    (dict(crval=[0.0, 0.0], crpix=[75.0, 75.0], cdelt=[-6.7e-3, 6.7e-3], rot_deg=0.0,
+          ctype=("GLON-CAR", "GLAT-CAR"))),
+    (dict(crval=[30.0, 10.0], crpix=[128.0, 128.0], cdelt=[-0.02, 0.02], rot_deg=8.0,
+          ctype=("GLON-CAR", "GLAT-CAR"))),
+    (dict(crval=[80.0, -20.0], crpix=[128.0, 128.0], cdelt=[-0.02, 0.02], rot_deg=-15.0,
+          ctype=("RA---CAR", "DEC--CAR"))),
 ]
 
 max_world_err = 0.0

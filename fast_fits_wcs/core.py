@@ -26,16 +26,18 @@ from .celestial import (
     native_to_celestial,
     celestial_to_native,
     default_lonpole,
+    compute_celestial_pole,
 )
 
-# Recognised celestial axis name -> (role, frame). Extend as needed.
-_LON_NAMES = {"RA": "icrs", "GLON": "galactic", "ELON": "barycentrictrueecliptic"}
-_LAT_NAMES = {"DEC": "icrs", "GLAT": "galactic", "ELAT": "barycentrictrueecliptic"}
+# Recognised celestial axis name -> coordinate-frame family. The exact
+# equatorial frame (icrs/fk5/fk4) is resolved later from RADESYS/EQUINOX.
+_LON_NAMES = {"RA": "equatorial", "GLON": "galactic", "ELON": "ecliptic"}
+_LAT_NAMES = {"DEC": "equatorial", "GLAT": "galactic", "ELAT": "ecliptic"}
 
 _PHYSICAL_TYPES = {
-    "icrs": ("pos.eq.ra", "pos.eq.dec"),
+    "equatorial": ("pos.eq.ra", "pos.eq.dec"),
     "galactic": ("pos.galactic.lon", "pos.galactic.lat"),
-    "barycentrictrueecliptic": ("pos.ecliptic.lon", "pos.ecliptic.lat"),
+    "ecliptic": ("pos.ecliptic.lon", "pos.ecliptic.lat"),
 }
 
 
@@ -84,21 +86,21 @@ def _build_transforms(code, lng, lat):
         return vec.reshape((2,) + (1,) * (ndim - 1))
 
     @jax.jit
-    def pixel_to_world(pix, crpix, cd, crval, phi_p):
+    def pixel_to_world(pix, crpix, cd, pole, phi_p):
         q = pix - _expand(crpix - 1.0, pix.ndim)          # 1-based offset from ref pixel
         m = jnp.einsum("ij,j...->i...", cd, q)            # intermediate world coords (deg)
         phi, theta = plane_to_native(m[lng], m[lat])
         alpha, delta = native_to_celestial(
-            phi, theta, crval[lng], crval[lat], phi_p
+            phi, theta, pole[0], pole[1], phi_p
         )
         out = [None, None]
         out[lng], out[lat] = alpha, delta
         return jnp.stack(out)
 
     @jax.jit
-    def world_to_pixel(world, crpix, cd_inv, crval, phi_p):
+    def world_to_pixel(world, crpix, cd_inv, pole, phi_p):
         phi, theta = celestial_to_native(
-            world[lng], world[lat], crval[lng], crval[lat], phi_p
+            world[lng], world[lat], pole[0], pole[1], phi_p
         )
         x, y = native_to_plane(phi, theta)
         m = [None, None]
@@ -136,6 +138,63 @@ class WCS(*_BASES):
         self.pc = np.eye(2)
         self._cd = None  # if set, overrides cdelt @ pc
         self.lonpole = None  # None -> FITS default
+        self.latpole = None  # None -> FITS default (+90)
+        self.radesys = None  # equatorial frame, e.g. 'FK5'/'ICRS'; None -> infer
+        self.equinox = None  # e.g. 2000.0; used to infer frame when RADESYS absent
+
+    @classmethod
+    def from_header(cls, header):
+        """Build a WCS from a FITS header (an ``astropy`` Header or a dict).
+
+        Reads the standard 2-D celestial keywords: CTYPEi, CRPIXi, CRVALi, and
+        the linear transform as either a CDi_j matrix or CDELTi with PCi_j /
+        CROTA2. LONPOLE is honoured if present. Only the projections this
+        package supports are accepted (see ``projections``).
+        """
+        # Normalise to a plain uppercase-key lookup so dicts and astropy
+        # Headers behave the same.
+        h = {str(k).upper(): v for k, v in dict(header).items()}
+
+        def need(key):
+            if key not in h:
+                raise ValueError(f"header is missing required keyword {key!r}")
+            return h[key]
+
+        naxis = int(h.get("WCSAXES", h.get("NAXIS", 2)))
+        w = cls(naxis=naxis)
+        w.ctype = [need(f"CTYPE{i}") for i in (1, 2)]
+        w.crpix = [float(need(f"CRPIX{i}")) for i in (1, 2)]
+        w.crval = [float(need(f"CRVAL{i}")) for i in (1, 2)]
+
+        if any(f"CD{i}_{j}" in h for i in (1, 2) for j in (1, 2)):
+            w.cd = [[float(h.get(f"CD{i}_{j}", 0.0)) for j in (1, 2)] for i in (1, 2)]
+        else:
+            cdelt = [float(h.get(f"CDELT{i}", 1.0)) for i in (1, 2)]
+            if any(f"PC{i}_{j}" in h for i in (1, 2) for j in (1, 2)):
+                pc = [[float(h.get(f"PC{i}_{j}", 1.0 if i == j else 0.0))
+                       for j in (1, 2)] for i in (1, 2)]
+                w.cdelt = cdelt
+                w.pc = pc
+            elif "CROTA2" in h:
+                # Old AIPS-style rotation -> equivalent CD matrix.
+                rho = float(h["CROTA2"]) * np.pi / 180.0
+                c, s = np.cos(rho), np.sin(rho)
+                w.cd = [[cdelt[0] * c, -cdelt[1] * s],
+                        [cdelt[0] * s, cdelt[1] * c]]
+            else:
+                w.cdelt = cdelt
+
+        if "LONPOLE" in h:
+            w.lonpole = float(h["LONPOLE"])
+        if "LATPOLE" in h:
+            w.latpole = float(h["LATPOLE"])
+        if "RADESYS" in h:
+            w.radesys = str(h["RADESYS"])
+        if "EQUINOX" in h:
+            w.equinox = float(h["EQUINOX"])
+        elif "EPOCH" in h:
+            w.equinox = float(h["EPOCH"])
+        return w
 
     # --- parameter handling --------------------------------------------------
 
@@ -153,30 +212,41 @@ class WCS(*_BASES):
         return _parse_ctype(tuple(self.ctype))
 
     def _params(self):
-        """Pack current attributes into jnp arrays for the transform functions."""
+        """Pack current attributes into jnp arrays for the transform functions.
+
+        The celestial pole ``(alpha_p, delta_p)`` and ``phi_p`` (LONPOLE) are
+        computed here on the host once per call -- cheap scalar work -- so the
+        jitted transforms stay projection-rotation-agnostic.
+        """
         lng, lat, code, frame = self._layout()
-        crpix = jnp.asarray(self.crpix, dtype=float)
-        crval = jnp.asarray(self.crval, dtype=float)
-        cd = jnp.asarray(self.cd, dtype=float)
+        theta0 = projections.get(code).theta0
+        alpha0, delta0 = float(self.crval[lng]), float(self.crval[lat])
+
         if self.lonpole is None:
-            phi_p = default_lonpole(float(self.crval[lat]), projections.get(code).theta0)
+            phi_p = default_lonpole(delta0, theta0)
         else:
             phi_p = float(self.lonpole)
+        latpole = 90.0 if self.latpole is None else float(self.latpole)
+        alpha_p, delta_p = compute_celestial_pole(alpha0, delta0, theta0, phi_p, latpole)
+
+        crpix = jnp.asarray(self.crpix, dtype=float)
+        cd = jnp.asarray(self.cd, dtype=float)
+        pole = jnp.asarray([alpha_p, delta_p], dtype=float)
         phi_p = jnp.asarray(phi_p, dtype=float)
-        return lng, lat, code, frame, crpix, crval, cd, phi_p
+        return lng, lat, code, frame, crpix, pole, cd, phi_p
 
     # --- raw numeric transforms (accept/return stacked jnp arrays) -----------
 
     def _pixel_to_world_stacked(self, pix):
-        lng, lat, code, frame, crpix, crval, cd, phi_p = self._params()
+        lng, lat, code, frame, crpix, pole, cd, phi_p = self._params()
         fwd, _ = _build_transforms(code, lng, lat)
-        return fwd(pix, crpix, cd, crval, phi_p)
+        return fwd(pix, crpix, cd, pole, phi_p)
 
     def _world_to_pixel_stacked(self, world):
-        lng, lat, code, frame, crpix, crval, cd, phi_p = self._params()
+        lng, lat, code, frame, crpix, pole, cd, phi_p = self._params()
         _, inv = _build_transforms(code, lng, lat)
         cd_inv = jnp.linalg.inv(cd)
-        return inv(world, crpix, cd_inv, crval, phi_p)
+        return inv(world, crpix, cd_inv, pole, phi_p)
 
     # --- APE 14: BaseLowLevelWCS -------------------------------------------
 
@@ -226,6 +296,26 @@ class WCS(*_BASES):
         out[lat] = ("celestial", 1, "spherical.lat.degree")
         return out
 
+    def _frame_kwargs(self, family):
+        """SkyCoord frame kwargs for a coordinate-frame family. The equatorial
+        frame is resolved from RADESYS/EQUINOX following FITS conventions."""
+        if family == "galactic":
+            return {"frame": "galactic"}
+        if family == "ecliptic":
+            return {"frame": "barycentrictrueecliptic"}
+        # equatorial
+        if self.radesys is not None:
+            name = self.radesys.strip().lower()
+        elif self.equinox is not None:
+            name = "fk5" if float(self.equinox) >= 1984.0 else "fk4"
+        else:
+            name = "icrs"
+        kwargs = {"frame": name}
+        if name in ("fk5", "fk4") and self.equinox is not None:
+            prefix = "J" if name == "fk5" else "B"
+            kwargs["equinox"] = f"{prefix}{float(self.equinox)}"
+        return kwargs
+
     @property
     def world_axis_object_classes(self):
         from astropy.coordinates import SkyCoord
@@ -235,7 +325,7 @@ class WCS(*_BASES):
             "celestial": (
                 SkyCoord,
                 (),
-                {"frame": frame, "unit": "deg"},
+                {"unit": "deg", **self._frame_kwargs(frame)},
             )
         }
 

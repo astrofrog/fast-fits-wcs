@@ -129,14 +129,27 @@ def _jit_transforms(code, lng, lat):
 
 
 def _array_namespace(x):
-    """Array-API namespace for ``x``; numpy for lists / Python scalars."""
+    """Array-API namespace for ``x``; numpy for lists / Python scalars.
+
+    Prefers ``array-api-compat`` when installed (robust cupy/torch/jax support),
+    falling back to the array's own ``__array_namespace__`` (numpy>=2, jax).
+    """
+    try:
+        import array_api_compat
+    except ImportError:
+        array_api_compat = None
+    if array_api_compat is not None:
+        try:
+            return array_api_compat.array_namespace(x)
+        except TypeError:  # lists / Python scalars
+            return np
     if hasattr(x, "__array_namespace__"):
         return x.__array_namespace__()
     return np
 
 
 def _is_jax(xp):
-    return getattr(xp, "__name__", "") in ("jax.numpy", "jax")
+    return "jax" in getattr(xp, "__name__", "")
 
 
 def _place(xp, host_array, ref):

@@ -14,6 +14,8 @@ dependencies = ["jax", "numpy"]
 # astropy is only needed for the high-level (SkyCoord) APE 14 interface and the
 # test/benchmark suite; the low-level numeric API works without it.
 highlevel = ["astropy"]
+# Robust namespace detection for cupy/torch (numpy/jax work without it).
+arrayapi = ["array-api-compat"]
 test = ["astropy", "reproject", "matplotlib"]
 
 [tool.hatch.version]

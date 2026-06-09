@@ -10,47 +10,46 @@ eqs. (2), (5) and (8)-(10) of Calabretta & Greisen (2002).
 """
 
 import numpy as np
-import jax.numpy as jnp
 
-DEG2RAD = jnp.pi / 180.0
-RAD2DEG = 180.0 / jnp.pi
+DEG2RAD = np.pi / 180.0
+RAD2DEG = 180.0 / np.pi
 
 
-def native_to_celestial(phi, theta, alpha_p, delta_p, phi_p):
+def native_to_celestial(xp, phi, theta, alpha_p, delta_p, phi_p):
     """(phi, theta) native -> (alpha, delta) celestial, all in degrees."""
     dphi = (phi - phi_p) * DEG2RAD
     theta_r = theta * DEG2RAD
     dp = delta_p * DEG2RAD
 
-    sin_t, cos_t = jnp.sin(theta_r), jnp.cos(theta_r)
-    sin_dp, cos_dp = jnp.sin(dp), jnp.cos(dp)
-    cos_dphi = jnp.cos(dphi)
+    sin_t, cos_t = xp.sin(theta_r), xp.cos(theta_r)
+    sin_dp, cos_dp = xp.sin(dp), xp.cos(dp)
+    cos_dphi = xp.cos(dphi)
 
     sin_d = sin_t * sin_dp + cos_t * cos_dp * cos_dphi
-    delta = jnp.arcsin(jnp.clip(sin_d, -1.0, 1.0)) * RAD2DEG
+    delta = xp.asin(xp.clip(sin_d, min=-1.0, max=1.0)) * RAD2DEG
 
-    y = -cos_t * jnp.sin(dphi)
+    y = -cos_t * xp.sin(dphi)
     x = sin_t * cos_dp - cos_t * sin_dp * cos_dphi
-    alpha = alpha_p + jnp.arctan2(y, x) * RAD2DEG
+    alpha = alpha_p + xp.atan2(y, x) * RAD2DEG
     return alpha % 360.0, delta
 
 
-def celestial_to_native(alpha, delta, alpha_p, delta_p, phi_p):
+def celestial_to_native(xp, alpha, delta, alpha_p, delta_p, phi_p):
     """(alpha, delta) celestial -> (phi, theta) native, all in degrees."""
     dalpha = (alpha - alpha_p) * DEG2RAD
     delta_r = delta * DEG2RAD
     dp = delta_p * DEG2RAD
 
-    sin_d, cos_d = jnp.sin(delta_r), jnp.cos(delta_r)
-    sin_dp, cos_dp = jnp.sin(dp), jnp.cos(dp)
-    cos_da = jnp.cos(dalpha)
+    sin_d, cos_d = xp.sin(delta_r), xp.cos(delta_r)
+    sin_dp, cos_dp = xp.sin(dp), xp.cos(dp)
+    cos_da = xp.cos(dalpha)
 
     sin_t = sin_d * sin_dp + cos_d * cos_dp * cos_da
-    theta = jnp.arcsin(jnp.clip(sin_t, -1.0, 1.0)) * RAD2DEG
+    theta = xp.asin(xp.clip(sin_t, min=-1.0, max=1.0)) * RAD2DEG
 
-    y = -cos_d * jnp.sin(dalpha)
+    y = -cos_d * xp.sin(dalpha)
     x = sin_d * cos_dp - cos_d * sin_dp * cos_da
-    phi = phi_p + jnp.arctan2(y, x) * RAD2DEG
+    phi = phi_p + xp.atan2(y, x) * RAD2DEG
     # Wrap native longitude to (-180, 180]. Harmless for zenithal projections
     # (which use sin/cos phi) but essential for cylindrical ones where the
     # plane coordinate is phi itself.

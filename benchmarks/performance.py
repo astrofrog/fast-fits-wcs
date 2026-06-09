@@ -42,13 +42,19 @@ a = make_astropy()
 j = make_jax()
 
 # Pull out the device-resident jitted core for the best-case jax number.
-from fast_fits_wcs.core import _build_transforms
-lng, lat, code, frame, crpix, crval, cd, phi_p = j._params()
-fwd, _ = _build_transforms(code, lng, lat)
+from fast_fits_wcs.core import _jit_transforms
+lng, lat, code, crpix, cd, pole, phi_p = j._param_arrays()
+crpix_j, cd_j, pole_j = jnp.asarray(crpix), jnp.asarray(cd), jnp.asarray(pole)
+fwd, _ = _jit_transforms(code, lng, lat)
 
-print(f"{'N':>12} | {'astropy ms':>12} | {'jax API ms':>12} | "
-      f"{'jax core ms':>12} | {'speedup(core)':>13}")
-print("-" * 72)
+# The low-level API now preserves the input's array namespace, so numpy in ->
+# numpy out (eager), jax in -> jax out (jitted). We time three things:
+#   astropy      : astropy.wcs, the reference
+#   ffw numpy    : fast_fits_wcs with numpy arrays (what a numpy/reproject user gets)
+#   ffw jax-core : the device-resident jitted transform (WCS as a node in a jax graph)
+print(f"{'N':>12} | {'astropy ms':>12} | {'ffw numpy ms':>13} | "
+      f"{'ffw jax-core ms':>16} | {'speedup(core)':>13}")
+print("-" * 78)
 
 for n in SIZES:
     rng = np.random.default_rng(1)
@@ -58,21 +64,19 @@ for n in SIZES:
     # astropy low-level values API (0-based)
     t_astropy = timeit(lambda: a.pixel_to_world_values(px, py))
 
-    # fast_fits_wcs full APE-14 API: host arrays in, host arrays out
-    j.pixel_to_world_values(px, py)  # warmup/compile for this shape
-    t_jax_api = timeit(lambda: j.pixel_to_world_values(px, py))
+    # fast_fits_wcs with numpy arrays: numpy in, numpy out, eager
+    t_numpy = timeit(lambda: j.pixel_to_world_values(px, py))
 
     # fast_fits_wcs device-resident core: inputs already jax arrays on device,
     # outputs kept on device (block_until_ready). This is the number that
     # matters when WCS is one node in a larger jax computation.
     pix_dev = jnp.stack([jnp.asarray(px), jnp.asarray(py)])
-    out = fwd(pix_dev, crpix, cd, crval, phi_p)
-    out.block_until_ready()
+    fwd(pix_dev, crpix_j, cd_j, pole_j, phi_p).block_until_ready()  # warmup/compile
 
     def core():
-        fwd(pix_dev, crpix, cd, crval, phi_p).block_until_ready()
+        fwd(pix_dev, crpix_j, cd_j, pole_j, phi_p).block_until_ready()
 
     t_jax_core = timeit(core)
 
-    print(f"{n:>12} | {t_astropy*1e3:>12.4f} | {t_jax_api*1e3:>12.4f} | "
-          f"{t_jax_core*1e3:>12.4f} | {t_astropy / t_jax_core:>12.2f}x")
+    print(f"{n:>12} | {t_astropy*1e3:>12.4f} | {t_numpy*1e3:>13.4f} | "
+          f"{t_jax_core*1e3:>16.4f} | {t_astropy / t_jax_core:>12.2f}x")

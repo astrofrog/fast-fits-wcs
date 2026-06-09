@@ -24,5 +24,11 @@ from astropy.io import fits
 w = WCS.from_header(fits.getheader("image.fits"))
 ```
 
+The low-level API (`pixel_to_world_values` / `world_to_pixel_values`) is
+[Array API](https://data-apis.org/array-api/) compliant: it computes in, and
+returns, the input's array namespace, so numpy in → numpy out, jax in → jax out
+(jitted), cupy in → cupy out, all on the input's device. The high-level
+(`SkyCoord`) API is numpy-backed, as `SkyCoord` requires.
+
 See `examples/reproject_example.py` for reprojecting a real galactic-center
 image and checking it against `astropy.wcs`.

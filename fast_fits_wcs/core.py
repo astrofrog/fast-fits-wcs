@@ -18,8 +18,6 @@ recompile -- only changing the projection or the input array shape does.
 from functools import lru_cache
 
 import numpy as np
-import jax
-import jax.numpy as jnp
 
 from . import projections
 from .celestial import (
@@ -68,46 +66,87 @@ def _parse_ctype(ctype):
     return lng, lat, code, frame
 
 
-@lru_cache(maxsize=None)
-def _build_transforms(code, lng, lat):
-    """Return jitted (pixel_to_world, world_to_pixel) for a projection layout.
+def _expand(xp, vec, ndim):
+    # (N,) -> (N, 1, 1, ...) to broadcast against an (N, *S) stack
+    return xp.reshape(vec, (vec.shape[0],) + (1,) * (ndim - 1))
 
-    Signatures (all arrays are jnp):
-        pixel_to_world(pix, crpix, cd, crval, phi_p) -> world
-        world_to_pixel(world, crpix, cd_inv, crval, phi_p) -> pix
-    where ``pix``/``world`` are stacked on axis 0: shape (2, *S).
+
+def _apply_matrix(xp, mat, q):
+    # mat @ q over the leading axis: (N, N) applied to (N, *S) -> (N, *S).
+    # Reshape to 2-D so we use only standard-array-API matmul (no einsum).
+    n = q.shape[0]
+    trailing = q.shape[1:]
+    q2 = xp.reshape(q, (n, -1))
+    m2 = xp.matmul(mat, q2)
+    return xp.reshape(m2, (n,) + trailing)
+
+
+@lru_cache(maxsize=None)
+def _make_transforms(code, lng, lat):
+    """Backend-agnostic (pixel_to_world, world_to_pixel) for a projection layout.
+
+    Both take the array namespace ``xp`` first; ``pix``/``world`` are stacked on
+    axis 0 with shape ``(2, *S)`` and the WCS parameters are arrays in ``xp``::
+
+        pixel_to_world(xp, pix,   crpix, cd,     pole, phi_p) -> world
+        world_to_pixel(xp, world, crpix, cd_inv, pole, phi_p) -> pix
     """
     proj = projections.get(code)
     plane_to_native = proj.plane_to_native
     native_to_plane = proj.native_to_plane
 
-    def _expand(vec, ndim):
-        # (2,) -> (2, 1, 1, ...) to broadcast against a (2, *S) stack
-        return vec.reshape((2,) + (1,) * (ndim - 1))
-
-    @jax.jit
-    def pixel_to_world(pix, crpix, cd, pole, phi_p):
-        q = pix - _expand(crpix - 1.0, pix.ndim)          # 1-based offset from ref pixel
-        m = jnp.einsum("ij,j...->i...", cd, q)            # intermediate world coords (deg)
-        phi, theta = plane_to_native(m[lng], m[lat])
-        alpha, delta = native_to_celestial(
-            phi, theta, pole[0], pole[1], phi_p
-        )
+    def pixel_to_world(xp, pix, crpix, cd, pole, phi_p):
+        q = pix - _expand(xp, crpix - 1.0, pix.ndim)      # 1-based offset from ref pixel
+        m = _apply_matrix(xp, cd, q)                      # intermediate world coords (deg)
+        phi, theta = plane_to_native(xp, m[lng], m[lat])
+        alpha, delta = native_to_celestial(xp, phi, theta, pole[0], pole[1], phi_p)
         out = [None, None]
         out[lng], out[lat] = alpha, delta
-        return jnp.stack(out)
+        return xp.stack(out)
 
-    @jax.jit
-    def world_to_pixel(world, crpix, cd_inv, pole, phi_p):
-        phi, theta = celestial_to_native(
-            world[lng], world[lat], pole[0], pole[1], phi_p
-        )
-        x, y = native_to_plane(phi, theta)
+    def world_to_pixel(xp, world, crpix, cd_inv, pole, phi_p):
+        phi, theta = celestial_to_native(xp, world[lng], world[lat], pole[0], pole[1], phi_p)
+        x, y = native_to_plane(xp, phi, theta)
         m = [None, None]
         m[lng], m[lat] = x, y
-        m = jnp.stack(m)
-        q = jnp.einsum("ij,j...->i...", cd_inv, m)
-        return q + _expand(crpix - 1.0, world.ndim)
+        m = xp.stack(m)
+        q = _apply_matrix(xp, cd_inv, m)
+        return q + _expand(xp, crpix - 1.0, world.ndim)
+
+    return pixel_to_world, world_to_pixel
+
+
+@lru_cache(maxsize=None)
+def _jit_transforms(code, lng, lat):
+    """jax-jitted wrappers of the generic transforms, for jax-array inputs."""
+    import jax
+    import jax.numpy as jnp
+
+    p2w, w2p = _make_transforms(code, lng, lat)
+    fwd = jax.jit(lambda pix, crpix, cd, pole, phi_p: p2w(jnp, pix, crpix, cd, pole, phi_p))
+    inv = jax.jit(lambda world, crpix, cd_inv, pole, phi_p: w2p(jnp, world, crpix, cd_inv, pole, phi_p))
+    return fwd, inv
+
+
+def _array_namespace(x):
+    """Array-API namespace for ``x``; numpy for lists / Python scalars."""
+    if hasattr(x, "__array_namespace__"):
+        return x.__array_namespace__()
+    return np
+
+
+def _is_jax(xp):
+    return getattr(xp, "__name__", "") in ("jax.numpy", "jax")
+
+
+def _place(xp, host_array, ref):
+    """Put a host (numpy) parameter array into ``xp`` on ``ref``'s device/dtype."""
+    dtype = ref.dtype
+    device = getattr(ref, "device", None)
+    try:
+        return xp.asarray(host_array, dtype=dtype, device=device)
+    except TypeError:  # backend's asarray doesn't take device=
+        return xp.asarray(host_array, dtype=dtype)
 
     return pixel_to_world, world_to_pixel
 
@@ -211,12 +250,13 @@ class WCS(*_BASES):
     def _layout(self):
         return _parse_ctype(tuple(self.ctype))
 
-    def _params(self):
-        """Pack current attributes into jnp arrays for the transform functions.
+    def _param_arrays(self):
+        """Current parameters as host (numpy) arrays plus the layout.
 
         The celestial pole ``(alpha_p, delta_p)`` and ``phi_p`` (LONPOLE) are
-        computed here on the host once per call -- cheap scalar work -- so the
-        jitted transforms stay projection-rotation-agnostic.
+        computed here on the host -- cheap scalar work, independent of the input
+        array's backend -- and moved onto the input's device by the callers.
+        Returns ``(lng, lat, code, crpix, cd, pole, phi_p)``.
         """
         lng, lat, code, frame = self._layout()
         theta0 = projections.get(code).theta0
@@ -229,24 +269,10 @@ class WCS(*_BASES):
         latpole = 90.0 if self.latpole is None else float(self.latpole)
         alpha_p, delta_p = compute_celestial_pole(alpha0, delta0, theta0, phi_p, latpole)
 
-        crpix = jnp.asarray(self.crpix, dtype=float)
-        cd = jnp.asarray(self.cd, dtype=float)
-        pole = jnp.asarray([alpha_p, delta_p], dtype=float)
-        phi_p = jnp.asarray(phi_p, dtype=float)
-        return lng, lat, code, frame, crpix, pole, cd, phi_p
-
-    # --- raw numeric transforms (accept/return stacked jnp arrays) -----------
-
-    def _pixel_to_world_stacked(self, pix):
-        lng, lat, code, frame, crpix, pole, cd, phi_p = self._params()
-        fwd, _ = _build_transforms(code, lng, lat)
-        return fwd(pix, crpix, cd, pole, phi_p)
-
-    def _world_to_pixel_stacked(self, world):
-        lng, lat, code, frame, crpix, pole, cd, phi_p = self._params()
-        _, inv = _build_transforms(code, lng, lat)
-        cd_inv = jnp.linalg.inv(cd)
-        return inv(world, crpix, cd_inv, pole, phi_p)
+        crpix = np.asarray(self.crpix, dtype=float)
+        cd = np.asarray(self.cd, dtype=float)
+        pole = np.asarray([alpha_p, delta_p], dtype=float)
+        return lng, lat, code, crpix, cd, pole, float(phi_p)
 
     # --- APE 14: BaseLowLevelWCS -------------------------------------------
 
@@ -279,14 +305,35 @@ class WCS(*_BASES):
         return list(self.ctype)
 
     def pixel_to_world_values(self, *pixel_arrays):
-        pix = jnp.stack([jnp.asarray(a, dtype=float) for a in pixel_arrays])
-        world = self._pixel_to_world_stacked(pix)
-        return tuple(np.asarray(world[i]) for i in range(2))
+        # Array-API: compute in (and return) the input's namespace, so passing
+        # numpy/jax/cupy arrays gives numpy/jax/cupy back, on the same device.
+        xp = _array_namespace(pixel_arrays[0])
+        lng, lat, code, crpix, cd, pole, phi_p = self._param_arrays()
+        pix = xp.stack([xp.asarray(a) for a in pixel_arrays])
+        if _is_jax(xp):
+            fwd, _ = _jit_transforms(code, lng, lat)
+            world = fwd(pix, xp.asarray(crpix, dtype=pix.dtype), xp.asarray(cd, dtype=pix.dtype),
+                        xp.asarray(pole, dtype=pix.dtype), phi_p)
+        else:
+            p2w, _ = _make_transforms(code, lng, lat)
+            world = p2w(xp, pix, _place(xp, crpix, pix), _place(xp, cd, pix),
+                        _place(xp, pole, pix), phi_p)
+        return tuple(world[i] for i in range(2))
 
     def world_to_pixel_values(self, *world_arrays):
-        world = jnp.stack([jnp.asarray(a, dtype=float) for a in world_arrays])
-        pix = self._world_to_pixel_stacked(world)
-        return tuple(np.asarray(pix[i]) for i in range(2))
+        xp = _array_namespace(world_arrays[0])
+        lng, lat, code, crpix, cd, pole, phi_p = self._param_arrays()
+        cd_inv = np.linalg.inv(cd)
+        world = xp.stack([xp.asarray(a) for a in world_arrays])
+        if _is_jax(xp):
+            _, inv = _jit_transforms(code, lng, lat)
+            pix = inv(world, xp.asarray(crpix, dtype=world.dtype), xp.asarray(cd_inv, dtype=world.dtype),
+                      xp.asarray(pole, dtype=world.dtype), phi_p)
+        else:
+            _, w2p = _make_transforms(code, lng, lat)
+            pix = w2p(xp, world, _place(xp, crpix, world), _place(xp, cd_inv, world),
+                      _place(xp, pole, world), phi_p)
+        return tuple(pix[i] for i in range(2))
 
     @property
     def world_axis_object_components(self):

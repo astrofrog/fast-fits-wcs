@@ -27,21 +27,16 @@ from .celestial import (
     compute_celestial_pole,
 )
 
-# Recognised celestial axis name -> coordinate-frame family. The exact
-# equatorial frame (icrs/fk5/fk4) is resolved later from RADESYS/EQUINOX.
-_LON_NAMES = {"RA": "equatorial", "GLON": "galactic", "ELON": "ecliptic"}
-_LAT_NAMES = {"DEC": "equatorial", "GLAT": "galactic", "ELAT": "ecliptic"}
-
-_PHYSICAL_TYPES = {
-    "equatorial": ("pos.eq.ra", "pos.eq.dec"),
-    "galactic": ("pos.galactic.lon", "pos.galactic.lat"),
-    "ecliptic": ("pos.ecliptic.lon", "pos.ecliptic.lat"),
-}
-
-
 def _parse_ctype(ctype):
-    """('RA---TAN', 'DEC--TAN') -> (lng_index, lat_index, proj_code, frame)."""
-    roles = []  # (axis_index, 'lon'|'lat', frame, code)
+    """('RA---TAN', 'DEC--TAN') -> (lng_index, lat_index, proj_code).
+
+    Identifies the celestial longitude/latitude axes by the FITS naming
+    convention (RA / xLON for longitude, DEC / xLAT for latitude). The actual
+    coordinate frame is *not* decided here -- that's left to astropy (see
+    ``WCS._astropy_wcs``); only the axis roles and projection code, which the
+    numeric transform needs, are determined.
+    """
+    roles = []  # (axis_index, 'lon'|'lat', code)
     for i, ct in enumerate(ctype):
         # CTYPE is 'NAME' then '-' fill then a 3-char projection code,
         # e.g. 'RA---TAN' or 'GLON-TAN'.
@@ -49,21 +44,18 @@ def _parse_ctype(ctype):
         if len(body) != 2:
             continue
         axis_name, code = body[0], body[1]
-        if axis_name in _LON_NAMES:
-            roles.append((i, "lon", _LON_NAMES[axis_name], code))
-        elif axis_name in _LAT_NAMES:
-            roles.append((i, "lat", _LAT_NAMES[axis_name], code))
-    if len(roles) != 2:
-        raise ValueError(f"Expected one lon and one lat celestial axis, got {ctype!r}")
+        if axis_name == "RA" or axis_name.endswith("LON"):
+            roles.append((i, "lon", code))
+        elif axis_name == "DEC" or axis_name.endswith("LAT"):
+            roles.append((i, "lat", code))
     by_role = {r[1]: r for r in roles}
     if "lon" not in by_role or "lat" not in by_role:
-        raise ValueError(f"CTYPE must contain a lon and a lat axis: {ctype!r}")
-    lng, lat = by_role["lon"][0], by_role["lat"][0]
-    code = by_role["lon"][3]
-    if by_role["lat"][3] != code:
+        raise ValueError(f"CTYPE must contain a celestial lon and lat axis: {ctype!r}")
+    lng, code = by_role["lon"][0], by_role["lon"][2]
+    lat = by_role["lat"][0]
+    if by_role["lat"][2] != code:
         raise ValueError("lon and lat axes must use the same projection")
-    frame = by_role["lon"][2]
-    return lng, lat, code, frame
+    return lng, lat, code
 
 
 def _expand(xp, vec, ndim):
@@ -271,7 +263,7 @@ class WCS(*_BASES):
         array's backend -- and moved onto the input's device by the callers.
         Returns ``(lng, lat, code, crpix, cd, pole, phi_p)``.
         """
-        lng, lat, code, frame = self._layout()
+        lng, lat, code = self._layout()
         theta0 = projections.get(code).theta0
         alpha0, delta0 = float(self.crval[lng]), float(self.crval[lat])
 
@@ -297,13 +289,34 @@ class WCS(*_BASES):
     def world_n_dim(self):
         return 2
 
+    def _astropy_wcs(self):
+        """An equivalent ``astropy.wcs.WCS`` built from these parameters.
+
+        Used only to derive the coordinate-frame metadata (which frame, which
+        physical types) -- astropy's machinery handles RADESYS/EQUINOX/FK4/FK5
+        and the frame registry far better than any hard-coded table. Not used in
+        the numeric (pixel<->world) path, which stays astropy-free.
+        """
+        from astropy.wcs import WCS as _AstropyWCS
+
+        a = _AstropyWCS(naxis=self.naxis)
+        a.wcs.ctype = list(self.ctype)
+        a.wcs.crval = list(self.crval)
+        a.wcs.crpix = list(self.crpix)
+        a.wcs.cd = self.cd
+        if self.lonpole is not None:
+            a.wcs.lonpole = float(self.lonpole)
+        if self.latpole is not None:
+            a.wcs.latpole = float(self.latpole)
+        if self.radesys is not None:
+            a.wcs.radesys = str(self.radesys)
+        if self.equinox is not None:
+            a.wcs.equinox = float(self.equinox)
+        return a
+
     @property
     def world_axis_physical_types(self):
-        lng, lat, code, frame = self._layout()
-        lon_t, lat_t = _PHYSICAL_TYPES[frame]
-        out = [None, None]
-        out[lng], out[lat] = lon_t, lat_t
-        return out
+        return self._astropy_wcs().world_axis_physical_types
 
     @property
     def world_axis_units(self):
@@ -350,44 +363,11 @@ class WCS(*_BASES):
 
     @property
     def world_axis_object_components(self):
-        lng, lat, code, frame = self._layout()
-        out = [None, None]
-        out[lng] = ("celestial", 0, "spherical.lon.degree")
-        out[lat] = ("celestial", 1, "spherical.lat.degree")
-        return out
-
-    def _frame_kwargs(self, family):
-        """SkyCoord frame kwargs for a coordinate-frame family. The equatorial
-        frame is resolved from RADESYS/EQUINOX following FITS conventions."""
-        if family == "galactic":
-            return {"frame": "galactic"}
-        if family == "ecliptic":
-            return {"frame": "barycentrictrueecliptic"}
-        # equatorial
-        if self.radesys is not None:
-            name = self.radesys.strip().lower()
-        elif self.equinox is not None:
-            name = "fk5" if float(self.equinox) >= 1984.0 else "fk4"
-        else:
-            name = "icrs"
-        kwargs = {"frame": name}
-        if name in ("fk5", "fk4") and self.equinox is not None:
-            prefix = "J" if name == "fk5" else "B"
-            kwargs["equinox"] = f"{prefix}{float(self.equinox)}"
-        return kwargs
+        return self._astropy_wcs().world_axis_object_components
 
     @property
     def world_axis_object_classes(self):
-        from astropy.coordinates import SkyCoord
-
-        lng, lat, code, frame = self._layout()
-        return {
-            "celestial": (
-                SkyCoord,
-                (),
-                {"unit": "deg", **self._frame_kwargs(frame)},
-            )
-        }
+        return self._astropy_wcs().world_axis_object_classes
 
     @property
     def pixel_shape(self):

@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jaxwcs"
+name = "fast-fits-wcs"
 dynamic = ["version"]
 description = "Minimal APE 14-compliant celestial FITS WCS, optimized for JAX"
 readme = "README.md"
@@ -14,10 +14,10 @@ dependencies = ["jax", "numpy"]
 # astropy is only needed for the high-level (SkyCoord) APE 14 interface and the
 # test/benchmark suite; the low-level numeric API works without it.
 highlevel = ["astropy"]
-test = ["astropy"]
+test = ["astropy", "reproject"]
 
 [tool.hatch.version]
 source = "vcs"
 
 [tool.hatch.build.hooks.vcs]
-version-file = "jaxwcs/_version.py"
+version-file = "fast_fits_wcs/_version.py"

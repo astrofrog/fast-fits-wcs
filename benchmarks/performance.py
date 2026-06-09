@@ -1,11 +1,11 @@
-"""Benchmark jaxwcs vs astropy.wcs for pixel->world over a range of sizes."""
+"""Benchmark fast_fits_wcs vs astropy.wcs for pixel->world over a range of sizes."""
 import time
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 from astropy.wcs import WCS as AstropyWCS
-from jaxwcs import WCS as JaxWCS
+from fast_fits_wcs import WCS as FastWCS
 
 SIZES = [1, 100, 10_000, 1_000_000, 10_000_000]
 REPEATS = 7
@@ -21,7 +21,7 @@ def make_astropy():
 
 
 def make_jax():
-    j = JaxWCS(naxis=2)
+    j = FastWCS(naxis=2)
     j.ctype = ["RA---TAN", "DEC--TAN"]
     j.crval = [10.0, 20.0]
     j.crpix = [128.0, 128.0]
@@ -42,7 +42,7 @@ a = make_astropy()
 j = make_jax()
 
 # Pull out the device-resident jitted core for the best-case jax number.
-from jaxwcs.core import _build_transforms
+from fast_fits_wcs.core import _build_transforms
 lng, lat, code, frame, crpix, crval, cd, phi_p = j._params()
 fwd, _ = _build_transforms(code, lng, lat)
 
@@ -58,11 +58,11 @@ for n in SIZES:
     # astropy low-level values API (0-based)
     t_astropy = timeit(lambda: a.pixel_to_world_values(px, py))
 
-    # jaxwcs full APE-14 API: host arrays in, host arrays out
+    # fast_fits_wcs full APE-14 API: host arrays in, host arrays out
     j.pixel_to_world_values(px, py)  # warmup/compile for this shape
     t_jax_api = timeit(lambda: j.pixel_to_world_values(px, py))
 
-    # jaxwcs device-resident core: inputs already jax arrays on device,
+    # fast_fits_wcs device-resident core: inputs already jax arrays on device,
     # outputs kept on device (block_until_ready). This is the number that
     # matters when WCS is one node in a larger jax computation.
     pix_dev = jnp.stack([jnp.asarray(px), jnp.asarray(py)])

@@ -253,6 +253,6 @@ class WCS(*_BASES):
 
     def __repr__(self):
         return (
-            f"<jaxwcs.WCS ctype={self.ctype} crval={self.crval} "
+            f"<fast_fits_wcs.WCS ctype={self.ctype} crval={self.crval} "
             f"crpix={self.crpix} cdelt={self.cdelt}>"
         )

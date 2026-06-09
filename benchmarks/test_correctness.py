@@ -1,7 +1,7 @@
-"""Check jaxwcs against astropy.wcs over random WCS and random points."""
+"""Check fast_fits_wcs against astropy.wcs over random WCS and random points."""
 import numpy as np
 from astropy.wcs import WCS as AstropyWCS
-from jaxwcs import WCS as JaxWCS
+from fast_fits_wcs import WCS as FastWCS
 
 rng = np.random.default_rng(0)
 
@@ -17,7 +17,7 @@ def make_pair(crval, crpix, cdelt, rot_deg, ctype=("RA---TAN", "DEC--TAN")):
     a.wcs.cdelt = cdelt
     a.wcs.pc = pc
 
-    j = JaxWCS(naxis=2)
+    j = FastWCS(naxis=2)
     j.ctype = list(ctype)
     j.crval = list(crval)
     j.crpix = list(crpix)

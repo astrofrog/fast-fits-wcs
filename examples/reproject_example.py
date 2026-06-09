@@ -1,24 +1,12 @@
-"""Reproject the MSX galactic-center image into the 2MASS frame, twice.
-
-This reproduces the classic ``reproject`` getting-started example, but does the
-reprojection two ways and compares them:
-
-* the input MSX image is ``GLON-CAR`` (galactic, cylindrical),
-* the output 2MASS frame is ``RA---TAN`` (equatorial, gnomonic),
-
-so it exercises both a cylindrical and a zenithal WCS, in different coordinate
-frames, entirely through the APE 14 interface. We build the WCS objects once
-with ``astropy.wcs.WCS`` and once with ``fast_fits_wcs.WCS.from_header``, feed
-each pair to ``reproject_interp``, and confirm the results agree. A WCSAxes
-figure shows the original, both reprojections, and their difference.
+"""Reproject the MSX galactic-center image (GLON-CAR) into the 2MASS frame
+(RA---TAN), with astropy.wcs and with fast_fits_wcs, and compare the results.
 
 Run:  python examples/reproject_example.py
-Data: the MSX/2MASS galactic-center cutouts bundled as astropy example data.
 """
 import numpy as np
 import matplotlib
 
-matplotlib.use("Agg")  # headless: write a PNG, don't open a window
+matplotlib.use("Agg")  # headless: write a PNG
 import matplotlib.pyplot as plt
 
 from astropy.io import fits
@@ -31,63 +19,43 @@ from fast_fits_wcs import WCS as FastWCS
 
 OUT_PNG = __file__.replace(".py", ".png")
 
-
-def load():
-    twomass = fits.open(get_pkg_data_filename("galactic_center/gc_2mass_k.fits"))[0]
-    msx = fits.open(get_pkg_data_filename("galactic_center/gc_msx_e.fits"))[0]
-    return twomass, msx
+twomass = fits.open(get_pkg_data_filename("galactic_center/gc_2mass_k.fits"))[0]
+msx = fits.open(get_pkg_data_filename("galactic_center/gc_msx_e.fits"))[0]
+shape_out = twomass.data.shape
 
 
-def main():
-    twomass, msx = load()
-    shape_out = twomass.data.shape
-
-    # Reproject MSX (GLON-CAR) onto the 2MASS (RA---TAN) frame, each WCS built
-    # by both libraries.
-    msx_astropy, _ = reproject_interp(
-        (msx.data, AstropyWCS(msx.header)),
-        AstropyWCS(twomass.header),
-        shape_out=shape_out,
-    )
-    msx_fast, _ = reproject_interp(
-        (msx.data, FastWCS.from_header(msx.header)),
-        FastWCS.from_header(twomass.header),
-        shape_out=shape_out,
-    )
-
-    # --- compare --------------------------------------------------------------
-    valid = np.isfinite(msx_astropy) & np.isfinite(msx_fast)
-    max_abs = np.max(np.abs(msx_astropy[valid] - msx_fast[valid]))
-    scale = np.nanpercentile(np.abs(msx_astropy[valid]), 99)
-    print(f"reprojected pixels (finite both): {int(valid.sum())}")
-    print(f"max |astropy - fast_fits_wcs|   : {max_abs:.3e}")
-    print(f"  (relative to 99th pct {scale:.3e}): {max_abs / scale:.2e}")
-    assert max_abs / scale < 1e-9, "reprojections disagree"
-
-    # --- plot (WCSAxes, on the 2MASS frame) ----------------------------------
-    twcs = AstropyWCS(twomass.header)
-    interval = PercentileInterval(99.0)
-    vmin, vmax = interval.get_limits(twomass.data)
-    mvmin, mvmax = interval.get_limits(msx_astropy[np.isfinite(msx_astropy)])
-
-    fig = plt.figure(figsize=(16, 4.2))
-    panels = [
-        ("2MASS K (original)", twomass.data, vmin, vmax, "afmhot"),
-        ("MSX reprojected (astropy.wcs)", msx_astropy, mvmin, mvmax, "afmhot"),
-        ("MSX reprojected (fast_fits_wcs)", msx_fast, mvmin, mvmax, "afmhot"),
-        ("difference (fast - astropy)", msx_fast - msx_astropy, -1e-12, 1e-12, "RdBu"),
-    ]
-    for i, (title, data, lo, hi, cmap) in enumerate(panels, start=1):
-        ax = fig.add_subplot(1, 4, i, projection=twcs)
-        ax.imshow(data, origin="lower", vmin=lo, vmax=hi, cmap=cmap)
-        ax.set_title(title, fontsize=10)
-        ax.coords[0].set_axislabel("RA")
-        ax.coords[1].set_axislabel("Dec")
-    fig.tight_layout()
-    fig.savefig(OUT_PNG, dpi=110)
-    print(f"\nwrote {OUT_PNG}")
-    print("OK: fast_fits_wcs reprojection matches astropy.wcs (CAR -> TAN, galactic -> equatorial)")
+def reproject_with(make_wcs):
+    out, _ = reproject_interp((msx.data, make_wcs(msx.header)),
+                              make_wcs(twomass.header), shape_out=shape_out)
+    return out
 
 
-if __name__ == "__main__":
-    main()
+ref = reproject_with(AstropyWCS)            # reference: astropy.wcs
+act = reproject_with(FastWCS.from_header)   # this package
+
+# Relative difference, restricted to pixels with real signal.
+m = np.isfinite(ref) & np.isfinite(act) & (np.abs(ref) > 0.01 * np.nanmax(np.abs(ref)))
+ratio = (act[m] - ref[m]) / ref[m]
+print(f"max |(act - ref) / ref| = {np.abs(ratio).max():.2e}  ({m.sum()} pixels)")
+
+twcs = AstropyWCS(twomass.header)
+fig = plt.figure(figsize=(13, 4))
+for i, (title, data) in enumerate([("2MASS K (original)", twomass.data),
+                                   ("MSX (astropy.wcs)", ref),
+                                   ("MSX (fast_fits_wcs)", act)], start=1):
+    ax = fig.add_subplot(1, 4, i, projection=twcs)
+    lo, hi = PercentileInterval(99.0).get_limits(data[np.isfinite(data)])
+    ax.imshow(data, origin="lower", vmin=lo, vmax=hi, cmap="afmhot")
+    ax.set_title(title, fontsize=9)
+    ax.coords[0].set_axislabel("RA")
+    ax.coords[1].set_axislabel("Dec")
+
+ax = fig.add_subplot(1, 4, 4)
+ax.hist(ratio, bins=100)
+ax.set_yscale("log")
+ax.set_title("(fast - astropy) / astropy", fontsize=9)
+ax.set_xlabel("relative difference")
+
+fig.tight_layout()
+fig.savefig(OUT_PNG, dpi=110)
+print("wrote", OUT_PNG)

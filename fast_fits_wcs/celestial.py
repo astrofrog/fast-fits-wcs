@@ -15,6 +15,12 @@ DEG2RAD = np.pi / 180.0
 RAD2DEG = 180.0 / np.pi
 
 
+def _clamp_unit(xp, v):
+    """Clamp to [-1, 1] for safe asin/acos, avoiding clip's min/max keywords
+    (unavailable on older numpy)."""
+    return xp.minimum(xp.maximum(v, -1.0), 1.0)
+
+
 def native_to_celestial(xp, phi, theta, alpha_p, delta_p, phi_p):
     """(phi, theta) native -> (alpha, delta) celestial, all in degrees."""
     dphi = (phi - phi_p) * DEG2RAD
@@ -26,7 +32,7 @@ def native_to_celestial(xp, phi, theta, alpha_p, delta_p, phi_p):
     cos_dphi = xp.cos(dphi)
 
     sin_d = sin_t * sin_dp + cos_t * cos_dp * cos_dphi
-    delta = xp.asin(xp.clip(sin_d, min=-1.0, max=1.0)) * RAD2DEG
+    delta = xp.asin(_clamp_unit(xp, sin_d)) * RAD2DEG
 
     y = -cos_t * xp.sin(dphi)
     x = sin_t * cos_dp - cos_t * sin_dp * cos_dphi
@@ -45,7 +51,7 @@ def celestial_to_native(xp, alpha, delta, alpha_p, delta_p, phi_p):
     cos_da = xp.cos(dalpha)
 
     sin_t = sin_d * sin_dp + cos_d * cos_dp * cos_da
-    theta = xp.asin(xp.clip(sin_t, min=-1.0, max=1.0)) * RAD2DEG
+    theta = xp.asin(_clamp_unit(xp, sin_t)) * RAD2DEG
 
     y = -cos_d * xp.sin(dalpha)
     x = sin_d * cos_dp - cos_d * sin_dp * cos_da

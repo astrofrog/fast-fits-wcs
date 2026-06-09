@@ -8,7 +8,9 @@ dynamic = ["version"]
 description = "Minimal APE 14-compliant celestial FITS WCS, optimized for JAX"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["jax", "numpy"]
+# numpy >= 2.0 for the array-API names (asin/atan2/...) on the main namespace;
+# older numpy works too if array-api-compat is installed.
+dependencies = ["jax", "numpy>=2.0"]
 
 [project.optional-dependencies]
 # astropy is only needed for the high-level (SkyCoord) APE 14 interface and the

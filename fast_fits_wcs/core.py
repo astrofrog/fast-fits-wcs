@@ -176,7 +176,7 @@ class WCS(*_BASES):
 
     Subclasses astropy's ``BaseLowLevelWCS``/``HighLevelWCSMixin`` when astropy
     is available, so ``wcs.pixel_to_world(...)`` returns a ``SkyCoord`` and the
-    object is a drop-in for anything that consumes the APE 14 interface.
+    object can be used by anything that consumes the APE 14 interface.
     """
 
     def __init__(self, naxis=2):

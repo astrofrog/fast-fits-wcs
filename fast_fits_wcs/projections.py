@@ -23,6 +23,12 @@ RAD2DEG = 180.0 / math.pi
 _REGISTRY = {}
 
 
+def _clamp_unit(xp, v):
+    """Clamp to [-1, 1] for safe asin/acos. Uses minimum/maximum rather than
+    clip, whose min/max keyword form isn't available on older numpy."""
+    return xp.minimum(xp.maximum(v, -1.0), 1.0)
+
+
 class Projection:
     """A spherical projection as a (plane->native, native->plane) function pair.
 
@@ -90,7 +96,7 @@ zenithal("STG",
 
 # SIN orthographic:          R = (180/pi) cos(theta)
 zenithal("SIN",
-         lambda xp, R: xp.acos(xp.clip(R * DEG2RAD, min=-1.0, max=1.0)) * RAD2DEG,
+         lambda xp, R: xp.acos(_clamp_unit(xp, R * DEG2RAD)) * RAD2DEG,
          lambda xp, th: RAD2DEG * xp.cos(th * DEG2RAD))
 
 # ARC zenithal equidistant:  R = 90 - theta   (degrees)
@@ -100,7 +106,7 @@ zenithal("ARC",
 
 # ZEA zenithal equal-area:   R = (360/pi) sin((90-theta)/2)
 zenithal("ZEA",
-         lambda xp, R: 90.0 - 2.0 * xp.asin(xp.clip(R * DEG2RAD / 2.0, min=-1.0, max=1.0)) * RAD2DEG,
+         lambda xp, R: 90.0 - 2.0 * xp.asin(_clamp_unit(xp, R * DEG2RAD / 2.0)) * RAD2DEG,
          lambda xp, th: 2.0 * RAD2DEG * xp.sin((90.0 - th) * DEG2RAD / 2.0))
 
 

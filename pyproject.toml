@@ -18,7 +18,10 @@ dependencies = ["jax", "numpy>=2.0"]
 highlevel = ["astropy"]
 # Robust namespace detection for cupy/torch (numpy/jax work without it).
 arrayapi = ["array-api-compat"]
-test = ["astropy", "reproject", "matplotlib"]
+test = ["astropy", "reproject", "matplotlib", "hypothesis", "pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["fast_fits_wcs"]
 
 [tool.hatch.version]
 source = "vcs"
